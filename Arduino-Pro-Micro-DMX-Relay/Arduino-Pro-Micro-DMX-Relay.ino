@@ -31,6 +31,10 @@ bool FAILSAFE_ALL_OFF        = true; // true: all off on NO DMX; false: hold las
 bool dmxPresent = false;
 unsigned long lastGoodDmxMs = 0;
 
+// Measured wall-clock time the last pollDmx() call took (ms).
+// Displayed on the home screen so slow blocking is immediately visible.
+unsigned long lastPollMs = 0;
+
 // ================= EEPROM =================
 struct Config {
   uint16_t magic;
@@ -208,6 +212,27 @@ void updateHomeRelayLine() {
   }
 }
 
+// Diagnostic line (row 1): real poll time left of relays, configured wait right.
+//   Cols 0-3  "P:XX"  – actual measured pollDmx() duration in ms; "P:HI" if > 99 ms
+//   Cols 4-11          – relay state chars (written by updateHomeRelayLine)
+//   Cols 12-15 "W:XX"  – configured DMX_RECEIVE_WAIT_MS (confirms EEPROM value)
+// If P:XX matches W:XX the library is behaving normally.
+// If P:XX >> W:XX (or shows P:HI) DMXSerial.receive() is blocking much longer than expected.
+void updateHomeDiagLine() {
+  if (screen != HOME) return;
+  char buf[5];
+  lcd.setCursor(0, 1);
+  if (lastPollMs > 99) {
+    lcd.print("P:HI");
+  } else {
+    snprintf(buf, sizeof(buf), "P:%02u", (unsigned)lastPollMs);
+    lcd.print(buf);
+  }
+  lcd.setCursor(12, 1);
+  snprintf(buf, sizeof(buf), "W:%02u", (unsigned)DMX_RECEIVE_WAIT_MS);
+  lcd.print(buf);
+}
+
 void drawHome() {
   lcd.clear();
   lcd.setCursor(2, 0);  // "Addr:XXX DMX" = 12 chars centered: (LCD_COLS-12)/2 = 2
@@ -220,17 +245,21 @@ void drawHome() {
   lcd.setCursor(14, 0);
   lcd.print("  ");
 
+  updateHomeDiagLine();
   updateHomeRelayLine();
 }
 
 // Boot splash: displayed briefly after LCD init so that a cold-PSU boot can be
-// diagnosed visually.  Each field confirms one init stage completed; Wire:ERR
-// means Wire.setWireTimeout fired at least once (I2C bus was not settling).
+// diagnosed visually.  Row 0 shows relay/DMX init plus the configured DMX wait
+// time (confirms the value loaded from EEPROM); Wire:ERR on row 1 means the
+// I2C bus timed out during lcd.init().
 void drawBootSplash() {
+  char buf[LCD_COLS + 1];
   lcd.clear();
-  // Row 0: relay pin setup + DMX serial init (both always succeed)
+  // Row 0: relay pin setup + DMX serial init + configured wait time
+  snprintf(buf, sizeof(buf), "Rly:OK  DMX:W%02u ", (unsigned)DMX_RECEIVE_WAIT_MS);
   lcd.setCursor(0, 0);
-  lcd.print("Rly:OK  DMX:OK  ");
+  lcd.print(buf);
   // Row 1: I2C bus recovery + Wire timeout flag
   lcd.setCursor(0, 1);
   bool wireErr = Wire.getWireTimeoutFlag();
@@ -274,7 +303,7 @@ unsigned long lastHeartbeatMs  = 0;
 void updateHeartbeat() {
   if (screen != HOME) return;
   unsigned long now = millis();
-  if (now - lastHeartbeatMs < 500) return;
+  if (now - lastHeartbeatMs < 100) return;  // 100 ms gives ~10 steps/sec — much more readable
   lastHeartbeatMs = now;
   heartbeatTick = (heartbeatTick + 1) & 3;
 
@@ -390,8 +419,15 @@ void setup() {
 }
 
 void loop() {
-  // Poll DMX (blocks for DMX_RECEIVE_WAIT_MS max)
-  pollDmx();
+  // Poll DMX and measure how long it actually blocks.
+  // lastPollMs is displayed on the home screen as "P:XX" so slow blocking is
+  // immediately visible — if P:XX >> W:XX the DMXSerial library is not honouring
+  // the receive timeout and is the root cause of slow loop / unresponsive buttons.
+  {
+    unsigned long t0 = millis();
+    pollDmx();
+    lastPollMs = millis() - t0;
+  }
 
   // Save config after idle
   if (pendingSave && (millis() - lastChangeMs) > SAVE_DELAY_MS) {
@@ -400,6 +436,9 @@ void loop() {
 
   // Heartbeat: spinning char in top-right of home screen proves loop() is alive
   updateHeartbeat();
+
+  // Diagnostic line: update poll-time reading every loop so the value is fresh
+  updateHomeDiagLine();
 
   // -------- UI --------
   if (screen == HOME) {
