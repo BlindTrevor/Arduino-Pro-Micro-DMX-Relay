@@ -248,6 +248,13 @@ void drawSettings() {
 
 // ================= SETUP / LOOP =================
 void setup() {
+  // Allow the power rail to stabilise before initialising any peripherals.
+  // When the board is powered by a transformer instead of USB the supply
+  // voltage can ramp up more slowly; without this delay the I²C bus, relay
+  // driver, and DMX transceiver may not yet be ready when we start talking
+  // to them, causing silent initialisation failures.
+  delay(250);
+
   pinMode(BTN_UP, INPUT_PULLUP);
   pinMode(BTN_DOWN, INPUT_PULLUP);
   pinMode(BTN_ENTER, INPUT_PULLUP);
@@ -269,7 +276,13 @@ void setup() {
   lcd.init();
   lcd.backlight();
 
-  lastGoodDmxMs = 0;
+  // Seed lastGoodDmxMs to now so the DMX-timeout window is measured from
+  // the moment the sketch is fully initialised, not from time zero.
+  // If we left it at 0, the first call to pollDmx() with no signal would
+  // evaluate (millis() – 0) < DMX_TIMEOUT_MS → true for the first second,
+  // falsely reporting DMX present and calling applyDmxToRelays() with
+  // all-zero channel values instead of honouring the failsafe setting.
+  lastGoodDmxMs = millis();
   dmxPresent = false;
 
   drawHome();
