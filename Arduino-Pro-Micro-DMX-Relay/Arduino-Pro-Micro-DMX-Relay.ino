@@ -23,17 +23,18 @@ uint16_t dmxStart = 1;
 uint8_t  ON_THRESHOLD  = 128;
 uint8_t  OFF_THRESHOLD = 120;
 
-// DMX probe + presence
-uint16_t DMX_RECEIVE_WAIT_MS = 30;   // how long each probe waits for a packet
+// DMX presence
+uint16_t DMX_RECEIVE_WAIT_MS = 30;   // legacy config value kept for EEPROM compatibility
 uint16_t DMX_TIMEOUT_MS      = 1000; // declare NO DMX if no valid packet for this long
 bool FAILSAFE_ALL_OFF        = true; // true: all off on NO DMX; false: hold last
 
 bool dmxPresent = false;
-unsigned long lastGoodDmxMs = 0;
 
-// Measured wall-clock time the last pollDmx() call took (ms).
-// Displayed on the home screen so slow blocking is immediately visible.
-unsigned long lastPollMs = 0;
+// Measured wall-clock time for one complete loop() iteration (ms).
+// Displayed on the home screen as "L:XX" so a frozen or slow loop is immediately
+// visible even without a serial port.  Should be < 10 ms in normal operation with
+// DMXReceiver mode.  Values >> 10 indicate Wire recovery or other blocking.
+unsigned long lastLoopMs = 0;
 
 // Timestamp of the last updateHomeDiagLine() LCD write.
 // The diag line is throttled to 500 ms to avoid flooding the I2C bus —
@@ -186,17 +187,23 @@ void saveConfigNow() {
   pendingSave = false;
 }
 
-// ================= DMX (Probe mode) =================
-// DMXProbe + receive(timeout) waits for a packet and returns true/false. [3](https://docs.arduino.cc/libraries/arduinodmx/)[1](https://github.com/mathertel/DMXSerial/blob/master/src/DMXSerial.h)
+// ================= DMX (Receiver mode) =================
+// DMXReceiver captures packets continuously in the background via USART1
+// interrupt.  pollDmx() is therefore non-blocking: it just compares the
+// time since the last complete packet against DMX_TIMEOUT_MS.
+//
+// WHY NOT DMXProbe?  DMXProbe's receive(wait) calls delay(1) in a tight loop
+// (wait iterations).  delay() uses millis(), which depends on Timer0 OVF.
+// On ATmega32U4, the USB interrupt vectors (USB_GEN_vect, USB_COM_vect) have
+// LOWER vector numbers than Timer0 OVF, so they have HIGHER hardware priority.
+// On cold power-on the USB hardware goes through reset/attach cycles, firing
+// USB interrupts frequently.  This starves Timer0, making each delay(1) take
+// 10-50 ms instead of 1 ms, so receive(30) can block for 300-1500 ms per call.
+// After an IDE upload the USB stack is already settled, so the bug never shows.
+// Switching to DMXReceiver eliminates the blocking call entirely: the loop now
+// runs in < 5 ms per iteration regardless of USB state.
 void pollDmx() {
-  bool gotPacket = DMXSerial.receive((uint8_t)DMX_RECEIVE_WAIT_MS); // [1](https://github.com/mathertel/DMXSerial/blob/master/src/DMXSerial.h)
-
-  if (gotPacket) {
-    lastGoodDmxMs = millis();
-    dmxPresent = true;
-  } else {
-    dmxPresent = (millis() - lastGoodDmxMs) < DMX_TIMEOUT_MS;
-  }
+  dmxPresent = (DMXSerial.noDataSince() < DMX_TIMEOUT_MS);
 }
 
 void applyDmxToRelays() {
@@ -240,12 +247,13 @@ void updateHomeRelayLine() {
   }
 }
 
-// Diagnostic line (row 1): real poll time left of relays, configured wait right.
-//   Cols 0-3  "P:XX"  – actual measured pollDmx() duration in ms; "P:HI" if > 99 ms
+// Diagnostic line (row 1): loop time left, relay states centre, DMX age right.
+//   Cols 0-3  "L:XX"  – total loop() duration in ms; should be < 10 ms in
+//                        normal operation.  Values > 10 indicate Wire recovery
+//                        or other blocking and explain slow / unresponsive behaviour.
 //   Cols 4-11          – relay state chars (written by updateHomeRelayLine)
-//   Cols 12-15 "W:XX"  – configured DMX_RECEIVE_WAIT_MS (confirms EEPROM value)
-// If P:XX matches W:XX the library is behaving normally.
-// If P:XX >> W:XX (or shows P:HI) DMXSerial.receive() is blocking much longer than expected.
+//   Cols 12-15 "S:XX"  – seconds since the last valid DMX packet (0 = active,
+//                        99 = 99+ seconds / no DMX ever received).
 void updateHomeDiagLine() {
   if (screen != HOME) return;
   // Throttle to 500 ms: each call performs ~40 I2C transactions; without
@@ -255,14 +263,16 @@ void updateHomeDiagLine() {
   lastDiagMs = now;
   char buf[5];
   lcd.setCursor(0, 1);
-  if (lastPollMs > 99) {
-    lcd.print("P:HI");
+  if (lastLoopMs > 99) {
+    lcd.print("L:HI");
   } else {
-    snprintf(buf, sizeof(buf), "P:%02u", (unsigned)lastPollMs);
+    snprintf(buf, sizeof(buf), "L:%02u", (unsigned)lastLoopMs);
     lcd.print(buf);
   }
   lcd.setCursor(12, 1);
-  snprintf(buf, sizeof(buf), "W:%02u", (unsigned)DMX_RECEIVE_WAIT_MS);
+  unsigned long sinceSec = DMXSerial.noDataSince() / 1000UL;
+  if (sinceSec > 99) sinceSec = 99;
+  snprintf(buf, sizeof(buf), "S:%02u", (unsigned)sinceSec);
   lcd.print(buf);
 }
 
@@ -296,10 +306,9 @@ void drawHome() {
 void drawBootSplash(uint8_t lcdAttempts, bool wireErr) {
   char buf[LCD_COLS + 1];
   lcd.clear();
-  // Row 0: relay pin setup + DMX serial init + configured wait time
-  snprintf(buf, sizeof(buf), "Rly:OK  DMX:W%02u ", (unsigned)DMX_RECEIVE_WAIT_MS);
+  // Row 0: relay pin setup + DMX mode (Receiver = non-blocking interrupt-driven)
   lcd.setCursor(0, 0);
-  lcd.print(buf);
+  lcd.print("Rly:OK  DMX:Rcv ");
   // Row 1: LCD init attempt count + Wire timeout flag
   snprintf(buf, sizeof(buf), "LCD:A%u  Wire:%s  ",
            (unsigned)lcdAttempts, wireErr ? "ERR" : "OK ");
@@ -432,16 +441,12 @@ void setup() {
   // ── Startup delay ───────────────────────────────────────────────────────────
   // When powered from an external 5 V supply the ATmega32U4 boots immediately
   // on power-on reset (the caterina bootloader skips the 8-second USB window
-  // for PORF resets).  An Arduino IDE upload, by contrast, triggers a DTR
-  // reset: the bootloader runs for ~8 seconds giving all peripherals ample
-  // time to stabilise before the sketch starts — which is exactly why the
-  // system "works after upload but fails after power cycle."
-  // A 2-second delay here gives the external PSU, relay module, LCD backpack
-  // (PCF8574), and MAX485 time to reach stable operating voltage before the
-  // sketch tries to communicate with them.
+  // for PORF resets).  A 1-second delay here gives the external PSU, relay
+  // module, LCD backpack (PCF8574), and MAX485 time to reach stable operating
+  // voltage before the sketch tries to drive or communicate with them.
   // BTN_ENTER is pulled up before the delay so the factory-reset check works.
   pinMode(BTN_ENTER, INPUT_PULLUP);
-  delay(2000);
+  delay(1000);
 
   pinMode(BTN_UP,   INPUT_PULLUP);
   pinMode(BTN_DOWN, INPUT_PULLUP);
@@ -449,9 +454,13 @@ void setup() {
 
   loadConfig();
 
-  // IMPORTANT: init DMX first (prevents your earlier hang).
-  // Use DMXProbe mode so we can call receive(timeout) explicitly.
-  DMXSerial.init(DMXProbe);
+  // Use DMXReceiver (continuous interrupt-driven receive) instead of DMXProbe.
+  // DMXProbe's receive(wait) calls delay(1) in a tight loop.  On ATmega32U4
+  // the USB interrupt vectors have higher hardware priority than Timer0 OVF,
+  // so USB activity on cold boot starves millis() and makes each delay(1)
+  // take far longer than 1 ms — turning a 30 ms poll into a 300-1500 ms block.
+  // DMXReceiver eliminates the blocking call entirely.
+  DMXSerial.init(DMXReceiver);
 
   // ── I2C + LCD init with cold-boot retry ────────────────────────────────────
   // On a cold power-cycle the PCF8574 LCD backpack may not respond on the
@@ -501,41 +510,44 @@ void setup() {
     }
   }
 
-  // Seed lastGoodDmxMs to now so the DMX-timeout window is measured from
-  // the moment the sketch is fully initialised, not from time zero.
-  // If we left it at 0, the first call to pollDmx() with no signal would
-  // evaluate (millis() – 0) < DMX_TIMEOUT_MS → true for the first second,
-  // falsely reporting DMX present and calling applyDmxToRelays() with
-  // all-zero channel values instead of honouring the failsafe setting.
-  lastGoodDmxMs = millis();
+  // Seed dmxPresent = false so the failsafe is applied from the very first
+  // loop() iteration.  DMXSerial.noDataSince() will naturally exceed
+  // DMX_TIMEOUT_MS once it has been long enough since DMXSerial.init().
   dmxPresent = false;
 
+  // Clear any Wire timeout flag set during the boot splash or drawHome() LCD
+  // writes, so the runtime recovery path in loop() does not fire spuriously on
+  // the very first iteration.
   drawHome();
+  Wire.clearWireTimeoutFlag();
 }
 
 void loop() {
+  unsigned long loopStart = millis(); // measure full loop duration for L:XX display
+
   // ── Runtime I2C recovery ──────────────────────────────────────────────────
   // If Wire.setWireTimeout() fired since the last iteration, the TWI hardware
-  // was auto-reset.  The PCF8574 may now be in a confused state, and every
-  // subsequent LCD call will NAK/timeout at 10 ms each, stalling the loop for
-  // hundreds of ms per update and making buttons appear dead.  Re-run the full
-  // I2C + LCD init sequence before any LCD writes happen this iteration.
+  // was auto-reset.  The PCF8574 may now be in a confused state so we re-init
+  // the bus and LCD.  Throttled to one attempt every 5 seconds: without the
+  // cooldown, a failed drawHome() inside the recovery sets the flag again and
+  // every subsequent loop() iteration tries to recover, adding 100-500 ms of
+  // blocking Wire transactions per loop and making buttons completely dead.
+  // The explicit clearWireTimeoutFlag() after the block prevents the death-
+  // spiral even when drawHome() causes a further timeout.
   if (Wire.getWireTimeoutFlag()) {
-    if (initI2cAndLcd()) {
-      drawHome();  // repaint screen only if re-init succeeded
+    static unsigned long lastWireRecoveryMs = 0;
+    unsigned long now = millis();
+    if (now - lastWireRecoveryMs >= 5000) {
+      lastWireRecoveryMs = now;
+      if (initI2cAndLcd()) {
+        drawHome();
+      }
+      Wire.clearWireTimeoutFlag(); // clear even if drawHome caused another timeout
     }
-    // If re-init also failed, the flag is set again; we try again next loop.
   }
 
-  // Poll DMX and measure how long it actually blocks.
-  // lastPollMs is displayed on the home screen as "P:XX" so slow blocking is
-  // immediately visible — if P:XX >> W:XX the DMXSerial library is not honouring
-  // the receive timeout and is the root cause of slow loop / unresponsive buttons.
-  {
-    unsigned long t0 = millis();
-    pollDmx();
-    lastPollMs = millis() - t0;
-  }
+  // Poll DMX — non-blocking in DMXReceiver mode (just reads a timestamp).
+  pollDmx();
 
   // Save config after idle
   if (pendingSave && (millis() - lastChangeMs) > SAVE_DELAY_MS) {
@@ -661,5 +673,6 @@ void loop() {
     }
   }
 
+  lastLoopMs = millis() - loopStart; // capture before delay so L:XX excludes idle wait
   delay(5);
 }
