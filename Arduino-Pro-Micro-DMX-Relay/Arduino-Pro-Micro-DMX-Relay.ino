@@ -2,6 +2,20 @@
 #include <Wire.h>
 #include <EEPROM.h>
 #include <LiquidCrystal_I2C.h>
+#include <util/delay.h>
+
+// Accurate busy-wait delay that does NOT depend on Timer0 or millis().
+// Use this anywhere in setup() where USB cold-boot enumeration may be starving
+// Timer0 OVF: on ATmega32U4, USB_GEN_vect (vector 10) has higher hardware
+// priority than Timer0 OVF (vector 22), so rapid USB ISR activity during
+// power-on makes millis() run far slower than wall-clock time, and delay()
+// (which is millis()-based) stretches accordingly.  _delay_ms() uses CPU
+// cycle counting via __builtin_avr_delay_cycles() — completely interrupt-proof.
+// Maximum accurate single call to _delay_ms() is ~262 ms at 16 MHz, so we
+// loop 1 ms at a time for arbitrary durations.
+static void blockingDelayMs(uint16_t ms) {
+  while (ms--) _delay_ms(1);
+}
 
 // ================= LCD =================
 LiquidCrystal_I2C lcd(0x27, 16, 2);
@@ -446,7 +460,9 @@ void setup() {
   // voltage before the sketch tries to drive or communicate with them.
   // BTN_ENTER is pulled up before the delay so the factory-reset check works.
   pinMode(BTN_ENTER, INPUT_PULLUP);
-  delay(1000);
+  // Use blockingDelayMs (CPU cycle-counting) not delay() — Timer0 is starved by
+  // USB enumeration ISRs on cold boot, making delay(1000) take ~8 real seconds.
+  blockingDelayMs(1000);
 
   pinMode(BTN_UP,   INPUT_PULLUP);
   pinMode(BTN_DOWN, INPUT_PULLUP);
@@ -476,7 +492,7 @@ void setup() {
   while (!lcdOk && lcdInitAttempts < 5) {
     lcdOk = initI2cAndLcd();
     lcdInitAttempts++;
-    if (!lcdOk) delay(500);  // back off before retrying
+    if (!lcdOk) blockingDelayMs(500);  // back off before retrying
   }
 
   // Show boot splash: attempt count + Wire status tells us whether cold-boot
@@ -485,13 +501,14 @@ void setup() {
 
   // ── Factory reset ─────────────────────────────────────────────────────────
   // Hold ENTER during the splash to wipe EEPROM and restore firmware defaults.
-  // This recovers from bad EEPROM values (e.g. W:80 blocking the loop) without
-  // needing to reflash.  The splash stays on screen for 2 s so there is plenty
-  // of time to release the button before normal operation begins.
+  // The splash window is 200 × 10 ms = 2 real seconds, timed with
+  // blockingDelayMs() (CPU cycle-counting) instead of millis()-based delay().
+  // Using millis()/delay() here caused the splash to display for ~17 seconds
+  // because USB_GEN_vect starvation of Timer0 made millis() run ~8× too slow
+  // on cold boot; 2000 millis-ticks accumulated over ~17 real seconds.
   {
-    unsigned long splashStart = millis();
     bool resetDone = false;
-    while (millis() - splashStart < 2000) {
+    for (uint16_t i = 0; i < 200; i++) {  // 200 × 10 ms = 2 s wall-clock
       if (!resetDone && digitalRead(BTN_ENTER) == LOW) {
         // Wipe the magic number so loadConfig() ignores the stored block.
         uint16_t blank = 0xFFFF;
@@ -506,7 +523,7 @@ void setup() {
         lcd.setCursor(0, 1);
         lcd.print("Defaults loaded ");
       }
-      delay(10);
+      blockingDelayMs(10);
     }
   }
 
