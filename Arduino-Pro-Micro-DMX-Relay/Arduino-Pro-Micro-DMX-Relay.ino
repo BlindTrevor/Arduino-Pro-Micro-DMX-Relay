@@ -216,8 +216,25 @@ void drawHome() {
   if (dmxStart < 10)  lcd.print('0');
   lcd.print(dmxStart);
   lcd.print(manualOverride ? " MAN" : " DMX");
+  // Cols 14-15 are the heartbeat area; clear them so updateHeartbeat() starts fresh
+  lcd.setCursor(14, 0);
+  lcd.print("  ");
 
   updateHomeRelayLine();
+}
+
+// Boot splash: displayed briefly after LCD init so that a cold-PSU boot can be
+// diagnosed visually.  Each field confirms one init stage completed; Wire:ERR
+// means Wire.setWireTimeout fired at least once (I2C bus was not settling).
+void drawBootSplash() {
+  lcd.clear();
+  // Row 0: relay pin setup + DMX serial init (both always succeed)
+  lcd.setCursor(0, 0);
+  lcd.print("Rly:OK  DMX:OK  ");
+  // Row 1: I2C bus recovery + Wire timeout flag
+  lcd.setCursor(0, 1);
+  bool wireErr = Wire.getWireTimeoutFlag();
+  lcd.print(wireErr ? "I2C:OK  Wire:ERR" : "I2C:OK  Wire:OK ");
 }
 
 void drawMenu() {
@@ -244,6 +261,28 @@ void drawSettings() {
   snprintf(buf, sizeof(buf), "To %d %s", DMX_TIMEOUT_MS,
            FAILSAFE_ALL_OFF ? "FS:OFF" : "FS:HLD");
   lcdPrintCentered(1, buf);
+}
+
+// ================= Heartbeat (diagnostic) =================
+// A spinning char in col 15, row 0 of the home screen proves loop() is alive.
+// Col 14 shows 'E' if the Wire library's timeout flag has been set, meaning at
+// least one I2C transfer timed out (LCD commands may be silently failing).
+const char SPINNER[] = {'-', '\\', '|', '/'};
+uint8_t       heartbeatTick    = 0;
+unsigned long lastHeartbeatMs  = 0;
+
+void updateHeartbeat() {
+  if (screen != HOME) return;
+  unsigned long now = millis();
+  if (now - lastHeartbeatMs < 500) return;
+  lastHeartbeatMs = now;
+  heartbeatTick = (heartbeatTick + 1) & 3;
+
+  bool wireErr = Wire.getWireTimeoutFlag();
+  lcd.setCursor(14, 0);
+  lcd.print(wireErr ? 'E' : ' ');
+  lcd.setCursor(15, 0);
+  lcd.print(SPINNER[heartbeatTick]);
 }
 
 // ================= I2C bus recovery =================
@@ -332,6 +371,12 @@ void setup() {
   lcd.init();
   lcd.backlight();
 
+  // Show a one-second boot splash so the user can see the status of each
+  // init stage on the LCD.  Wire:ERR means the I2C bus timed out during
+  // lcd.init(); Wire:OK means all I2C traffic completed without a timeout.
+  drawBootSplash();
+  delay(1000);
+
   // Seed lastGoodDmxMs to now so the DMX-timeout window is measured from
   // the moment the sketch is fully initialised, not from time zero.
   // If we left it at 0, the first call to pollDmx() with no signal would
@@ -352,6 +397,9 @@ void loop() {
   if (pendingSave && (millis() - lastChangeMs) > SAVE_DELAY_MS) {
     saveConfigNow();
   }
+
+  // Heartbeat: spinning char in top-right of home screen proves loop() is alive
+  updateHeartbeat();
 
   // -------- UI --------
   if (screen == HOME) {
