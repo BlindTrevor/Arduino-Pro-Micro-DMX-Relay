@@ -5,6 +5,7 @@
 
 // ================= LCD =================
 LiquidCrystal_I2C lcd(0x27, 16, 2);
+const uint8_t LCD_COLS = 16;
 
 // ================= Hardware =================
 const uint8_t relayPins[8] = {4, 5, 6, 7, 8, 9, 10, 16};
@@ -187,12 +188,19 @@ void applyManualRelays() {
 }
 
 // ================= LCD screens =================
+void lcdPrintCentered(uint8_t row, const char* str) {
+  uint8_t len = strlen(str);
+  uint8_t col = (len < LCD_COLS) ? ((LCD_COLS - len) / 2) : 0;
+  lcd.setCursor(col, row);
+  lcd.print(str);
+}
+
 bool activeRelayState(uint8_t i) {
   return manualOverride ? manualRelayState[i] : relayState[i];
 }
 
 void updateHomeRelayLine() {
-  lcd.setCursor(0,1);
+  lcd.setCursor(4, 1);  // 8 relay chars centered: (LCD_COLS-8)/2 = 4
   for (uint8_t i = 0; i < 8; i++) {
     bool on = activeRelayState(i);
     lcd.print(on ? (char)('1' + i) : '-');
@@ -202,7 +210,7 @@ void updateHomeRelayLine() {
 
 void drawHome() {
   lcd.clear();
-  lcd.setCursor(0,0);
+  lcd.setCursor(2, 0);  // "Addr:XXX DMX" = 12 chars centered: (LCD_COLS-12)/2 = 2
   lcd.print("Addr:");
   if (dmxStart < 100) lcd.print('0');
   if (dmxStart < 10)  lcd.print('0');
@@ -214,37 +222,28 @@ void drawHome() {
 
 void drawMenu() {
   lcd.clear();
-  lcd.setCursor(0,0);
-  lcd.print("Menu:");
-  lcd.setCursor(0,1);
-  if (menuIndex == 0) lcd.print(">Manual Control");
-  else                lcd.print(">Settings");
+  lcdPrintCentered(0, "Menu:");
+  if (menuIndex == 0) lcdPrintCentered(1, ">Manual Control");
+  else                lcdPrintCentered(1, ">Settings");
 }
 
 void drawManual() {
+  char buf[LCD_COLS + 1];
+  snprintf(buf, sizeof(buf), "Relay %d: %s", manualIndex + 1,
+           manualRelayState[manualIndex] ? "ON " : "OFF");
   lcd.clear();
-  lcd.setCursor(0,0);
-  lcd.print("Relay ");
-  lcd.print(manualIndex + 1);
-  lcd.print(": ");
-  lcd.print(manualRelayState[manualIndex] ? "ON " : "OFF");
-
-  lcd.setCursor(0,1);
-  lcd.print("Up/Dn Sel EntTgl");
+  lcdPrintCentered(0, buf);
+  lcdPrintCentered(1, "Up/Dn Sel EntTgl");
 }
 
 void drawSettings() {
+  char buf[LCD_COLS + 1];
   lcd.clear();
-  lcd.setCursor(0,0);
-  lcd.print("Thr ");
-  lcd.print(ON_THRESHOLD);
-  lcd.print(" W");
-  lcd.print(DMX_RECEIVE_WAIT_MS);
-
-  lcd.setCursor(0,1);
-  lcd.print("To ");
-  lcd.print(DMX_TIMEOUT_MS);
-  lcd.print(FAILSAFE_ALL_OFF ? " FS:OFF" : " FS:HLD");
+  snprintf(buf, sizeof(buf), "Thr %d W%d", ON_THRESHOLD, DMX_RECEIVE_WAIT_MS);
+  lcdPrintCentered(0, buf);
+  snprintf(buf, sizeof(buf), "To %d %s", DMX_TIMEOUT_MS,
+           FAILSAFE_ALL_OFF ? "FS:OFF" : "FS:HLD");
+  lcdPrintCentered(1, buf);
 }
 
 // ================= SETUP / LOOP =================
