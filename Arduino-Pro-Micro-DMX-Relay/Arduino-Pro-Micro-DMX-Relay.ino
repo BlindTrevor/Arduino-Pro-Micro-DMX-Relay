@@ -255,13 +255,18 @@ const uint8_t I2C_SCL_PIN = 3;
 const uint8_t I2C_RECOVERY_CLOCKS    = 9;  // max clocks needed to free a stuck slave
 const uint8_t I2C_RECOVERY_HALF_US   = 5;  // half-period in microseconds
 
-// If a peripheral holds SDA low at power-on (e.g. LCD PCF8574 mid-reset),
-// the AVR Wire library can hang indefinitely. Toggling SCL up to 9 times
-// forces any stuck slave to release SDA so normal communication can resume.
+// Send 9 SCL clock pulses unconditionally to clock out any partial byte a
+// slave may be mid-transmitting, then issue a STOP condition.  Run this
+// before Wire.begin() so the bus is always in a known IDLE state regardless
+// of what happened at power-on (the early-return-on-SDA-HIGH heuristic was
+// not reliable enough — SDA can be HIGH mid-transaction).
 void recoverI2cBus() {
+  // Float both lines first so we can sense the bus without fighting any slave
+  pinMode(I2C_SCL_PIN, INPUT);
   pinMode(I2C_SDA_PIN, INPUT);
-  if (digitalRead(I2C_SDA_PIN) == HIGH) return; // bus is free, nothing to do
+  delayMicroseconds(I2C_RECOVERY_HALF_US);
 
+  // Clock out up to 9 pulses — enough to complete any partial byte
   pinMode(I2C_SCL_PIN, OUTPUT);
   for (uint8_t i = 0; i < I2C_RECOVERY_CLOCKS; i++) {
     digitalWrite(I2C_SCL_PIN, HIGH);
@@ -269,9 +274,11 @@ void recoverI2cBus() {
     digitalWrite(I2C_SCL_PIN, LOW);
     delayMicroseconds(I2C_RECOVERY_HALF_US);
   }
+
   // Issue a STOP condition (SDA LOW→HIGH while SCL HIGH)
   pinMode(I2C_SDA_PIN, OUTPUT);
   digitalWrite(I2C_SDA_PIN, LOW);
+  delayMicroseconds(I2C_RECOVERY_HALF_US);
   digitalWrite(I2C_SCL_PIN, HIGH);
   delayMicroseconds(I2C_RECOVERY_HALF_US);
   digitalWrite(I2C_SDA_PIN, HIGH);
@@ -280,24 +287,28 @@ void recoverI2cBus() {
 
 // ================= SETUP / LOOP =================
 void setup() {
+  // ── Relay pins: drive HIGH before anything else ─────────────────────────────
+  // Relay pins float as inputs (high-Z) from reset.  On an active-LOW relay
+  // module a floating input can pull the coil down and briefly energise the
+  // relay before setup() configures the pin.  Drive OUTPUT HIGH immediately so
+  // the module stays de-energised throughout the rest of initialisation.
+  for (uint8_t i = 0; i < 8; i++) {
+    pinMode(relayPins[i], OUTPUT);
+    setRelay(i, false);
+  }
+
+  // ── Startup delay ───────────────────────────────────────────────────────────
   // When powered from an external 5 V supply (no USB), the ATmega32U4 boots
   // immediately without the ~8-second USB-bootloader wait that normally lets
-  // all peripherals stabilize. A short delay here ensures the relay module,
+  // all peripherals stabilize. A 1-second delay here ensures the relay module,
   // LCD, and MAX485 are fully powered before we try to drive or communicate
   // with them.
-  delay(500);
+  delay(1000);
 
   pinMode(BTN_UP, INPUT_PULLUP);
   pinMode(BTN_DOWN, INPUT_PULLUP);
   pinMode(BTN_ENTER, INPUT_PULLUP);
   pinMode(BTN_BACK, INPUT_PULLUP);
-
-  // Drive relay pins HIGH immediately so active-LOW relay module stays OFF
-  // while the rest of initialisation runs (pins float at power-on otherwise).
-  for (uint8_t i = 0; i < 8; i++) {
-    pinMode(relayPins[i], OUTPUT);
-    setRelay(i, false);
-  }
 
   loadConfig();
 
@@ -308,10 +319,16 @@ void setup() {
   // Recover the I2C bus before initialising the LCD.  If the PCF8574
   // backpack was still in power-on reset when the MCU started it may hold
   // SDA low, which would cause Wire.endTransmission() to hang forever on
-  // AVR (no hardware timeout).
+  // AVR (no hardware timeout).  The recovery clocks out any partial byte and
+  // issues a STOP so the bus is guaranteed idle before Wire.begin().
   recoverI2cBus();
 
   Wire.begin();
+  // Set a 10 ms I2C timeout so a stuck bus can never hang the firmware.
+  // Without this, a single Wire.endTransmission() that stalls causes setup()
+  // to loop forever and loop() never runs — buttons and relays both appear
+  // dead.  Requires Wire library 1.0+ (Arduino IDE 1.8.13 or later).
+  Wire.setWireTimeout(10000, true);
   lcd.init();
   lcd.backlight();
 
