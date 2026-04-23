@@ -194,8 +194,10 @@ void drawHome() {
   lcd.print(manualOverride ? " MAN" : " DMX");
 
   lcd.setCursor(0,1);
-  lcd.print(dmxPresent ? "DMX OK " : "NO DMX ");
-  lcd.print("Ent Menu Back");
+  for (uint8_t i = 0; i < 8; i++) {
+    bool on = manualOverride ? manualRelayState[i] : relayState[i];
+    lcd.print(on ? (char)('1' + i) : '-');
+  }
 }
 
 void drawMenu() {
