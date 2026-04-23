@@ -287,20 +287,25 @@ void drawHome() {
 }
 
 // Boot splash: displayed briefly after LCD init so that a cold-PSU boot can be
-// diagnosed visually.  Row 0 shows relay/DMX init plus the configured DMX wait
-// time (confirms the value loaded from EEPROM); Wire:ERR on row 1 means the
-// I2C bus timed out during lcd.init().
-void drawBootSplash() {
+// diagnosed visually.
+//   Row 0: "Rly:OK  DMX:W30 " – relay init and configured DMX wait time
+//   Row 1: "LCD:A1  Wire:OK " – how many lcd.init() attempts were needed, and
+//           whether any I2C timeout occurred.  "A1" means first attempt worked.
+//           "A3" and "Wire:ERR" means it took 3 attempts and still has errors.
+//           Seeing A>1 on a cold boot confirms the PCF8574 power-on timing issue.
+void drawBootSplash(uint8_t lcdAttempts, bool wireErr) {
   char buf[LCD_COLS + 1];
   lcd.clear();
   // Row 0: relay pin setup + DMX serial init + configured wait time
   snprintf(buf, sizeof(buf), "Rly:OK  DMX:W%02u ", (unsigned)DMX_RECEIVE_WAIT_MS);
   lcd.setCursor(0, 0);
   lcd.print(buf);
-  // Row 1: I2C bus recovery + Wire timeout flag
+  // Row 1: LCD init attempt count + Wire timeout flag
+  snprintf(buf, sizeof(buf), "LCD:A%u  Wire:%s  ",
+           (unsigned)lcdAttempts, wireErr ? "ERR" : "OK ");
+  buf[LCD_COLS] = '\0';
   lcd.setCursor(0, 1);
-  bool wireErr = Wire.getWireTimeoutFlag();
-  lcd.print(wireErr ? "I2C:OK  Wire:ERR" : "I2C:OK  Wire:OK ");
+  lcd.print(buf);
 }
 
 void drawMenu() {
@@ -349,6 +354,28 @@ void updateHeartbeat() {
   lcd.print(wireErr ? 'E' : ' ');
   lcd.setCursor(15, 0);
   lcd.print(SPINNER[heartbeatTick]);
+}
+
+// ================= I2C + LCD initialisation (shared helper) =================
+// Encapsulates the full sequence: bus recovery → Wire.begin() →
+// Wire.setWireTimeout() → lcd.init() → lcd.backlight().
+// Clears the Wire timeout flag before the attempt and returns true if the
+// attempt completed without a timeout (i.e. LCD is now responsive).
+// Called from setup() (possibly multiple times) and from the runtime recovery
+// path in loop().
+bool initI2cAndLcd() {
+  Wire.clearWireTimeoutFlag();
+  recoverI2cBus();
+  Wire.begin();
+  // 10 ms I2C timeout — prevents any single transaction from hanging the
+  // firmware forever.  reset_with_timeout=true auto-resets the TWI hardware
+  // when a timeout fires, which is necessary to recover the master state
+  // machine.  The downside is the PCF8574 may be confused afterwards, which
+  // is why we check the flag and retry / re-init when it is set.
+  Wire.setWireTimeout(10000, true);
+  lcd.init();
+  lcd.backlight();
+  return !Wire.getWireTimeoutFlag();
 }
 
 // ================= I2C bus recovery =================
@@ -403,14 +430,18 @@ void setup() {
   }
 
   // ── Startup delay ───────────────────────────────────────────────────────────
-  // When powered from an external 5 V supply (no USB), the ATmega32U4 boots
-  // immediately without the ~8-second USB-bootloader wait that normally lets
-  // all peripherals stabilize. A 1-second delay here ensures the relay module,
-  // LCD, and MAX485 are fully powered before we try to drive or communicate
-  // with them.
-  // BTN_ENTER is pulled up early so the factory-reset check below works.
+  // When powered from an external 5 V supply the ATmega32U4 boots immediately
+  // on power-on reset (the caterina bootloader skips the 8-second USB window
+  // for PORF resets).  An Arduino IDE upload, by contrast, triggers a DTR
+  // reset: the bootloader runs for ~8 seconds giving all peripherals ample
+  // time to stabilise before the sketch starts — which is exactly why the
+  // system "works after upload but fails after power cycle."
+  // A 2-second delay here gives the external PSU, relay module, LCD backpack
+  // (PCF8574), and MAX485 time to reach stable operating voltage before the
+  // sketch tries to communicate with them.
+  // BTN_ENTER is pulled up before the delay so the factory-reset check works.
   pinMode(BTN_ENTER, INPUT_PULLUP);
-  delay(1000);
+  delay(2000);
 
   pinMode(BTN_UP,   INPUT_PULLUP);
   pinMode(BTN_DOWN, INPUT_PULLUP);
@@ -422,26 +453,26 @@ void setup() {
   // Use DMXProbe mode so we can call receive(timeout) explicitly.
   DMXSerial.init(DMXProbe);
 
-  // Recover the I2C bus before initialising the LCD.  If the PCF8574
-  // backpack was still in power-on reset when the MCU started it may hold
-  // SDA low, which would cause Wire.endTransmission() to hang forever on
-  // AVR (no hardware timeout).  The recovery clocks out any partial byte and
-  // issues a STOP so the bus is guaranteed idle before Wire.begin().
-  recoverI2cBus();
+  // ── I2C + LCD init with cold-boot retry ────────────────────────────────────
+  // On a cold power-cycle the PCF8574 LCD backpack may not respond on the
+  // first attempt (supply still stabilising, or a stray I2C glitch).  When
+  // Wire.setWireTimeout fires and resets the TWI hardware, the PCF8574 is
+  // left in an undefined state.  Every subsequent LCD call then times out at
+  // 10 ms each — 36 calls × 10 ms = 360 ms of blocking per relay-line update,
+  // making the loop appear frozen and buttons completely unresponsive.
+  // We retry the full init sequence (bus-recovery → Wire.begin → lcd.init)
+  // until it succeeds or we exhaust our attempts, backing off between tries.
+  uint8_t lcdInitAttempts = 0;
+  bool    lcdOk           = false;
+  while (!lcdOk && lcdInitAttempts < 5) {
+    lcdOk = initI2cAndLcd();
+    lcdInitAttempts++;
+    if (!lcdOk) delay(500);  // back off before retrying
+  }
 
-  Wire.begin();
-  // Set a 10 ms I2C timeout so a stuck bus can never hang the firmware.
-  // Without this, a single Wire.endTransmission() that stalls causes setup()
-  // to loop forever and loop() never runs — buttons and relays both appear
-  // dead.  Requires Wire library 1.0+ (Arduino IDE 1.8.13 or later).
-  Wire.setWireTimeout(10000, true);
-  lcd.init();
-  lcd.backlight();
-
-  // Show a one-second boot splash so the user can see the status of each
-  // init stage on the LCD.  Wire:ERR means the I2C bus timed out during
-  // lcd.init(); Wire:OK means all I2C traffic completed without a timeout.
-  drawBootSplash();
+  // Show boot splash: attempt count + Wire status tells us whether cold-boot
+  // I2C instability occurred (A>1 or Wire:ERR on a cold start is diagnostic).
+  drawBootSplash(lcdInitAttempts, !lcdOk);
 
   // ── Factory reset ─────────────────────────────────────────────────────────
   // Hold ENTER during the splash to wipe EEPROM and restore firmware defaults.
@@ -483,6 +514,19 @@ void setup() {
 }
 
 void loop() {
+  // ── Runtime I2C recovery ──────────────────────────────────────────────────
+  // If Wire.setWireTimeout() fired since the last iteration, the TWI hardware
+  // was auto-reset.  The PCF8574 may now be in a confused state, and every
+  // subsequent LCD call will NAK/timeout at 10 ms each, stalling the loop for
+  // hundreds of ms per update and making buttons appear dead.  Re-run the full
+  // I2C + LCD init sequence before any LCD writes happen this iteration.
+  if (Wire.getWireTimeoutFlag()) {
+    if (initI2cAndLcd()) {
+      drawHome();  // repaint screen only if re-init succeeded
+    }
+    // If re-init also failed, the flag is set again; we try again next loop.
+  }
+
   // Poll DMX and measure how long it actually blocks.
   // lastPollMs is displayed on the home screen as "P:XX" so slow blocking is
   // immediately visible — if P:XX >> W:XX the DMXSerial library is not honouring
