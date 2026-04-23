@@ -115,6 +115,25 @@ Install the following libraries via the Arduino Library Manager before compiling
 | Processor | ATmega32U4 (5 V, 16 MHz) |
 | Port | The COM/tty port that appears when the Pro Micro is plugged in |
 
+### Powering from an External 5 V Supply
+
+When the board is powered via USB the USB bootloader waits roughly 8 seconds before launching the firmware, giving all peripherals time to stabilize. When powered from an external 5 V transformer the MCU boots immediately, which can starve the I²C LCD backpack of its initialization window and leave the I²C bus stuck — causing the firmware to hang before `loop()` ever runs (buttons and relays both appear dead).
+
+The firmware already accounts for this with:
+
+1. **500 ms startup delay** at the beginning of `setup()` so relay module, LCD, and MAX485 all have time to reach their operating states.
+2. **I²C bus recovery** — up to 9 SCL clock pulses are driven before `Wire.begin()` to release any slave that is holding SDA low.
+
+**Power-supply requirements when not using USB:**
+
+| Parameter | Minimum | Recommended |
+|---|---|---|
+| Voltage | 4.75 V | 5.0 V |
+| Current | 500 mA | 1 A or more |
+| Ripple | — | < 50 mV pp |
+
+Use a regulated 5 V DC supply with adequate current headroom for all 8 relay coils plus the MCU, LCD, and MAX485. A supply rated below ~500 mA may brown-out under the inrush when multiple relays switch simultaneously.
+
 ---
 
 ## Operation

@@ -246,13 +246,54 @@ void drawSettings() {
   lcdPrintCentered(1, buf);
 }
 
+// ================= I2C bus recovery =================
+// Pro Micro I2C pins (ATmega32U4 hardware mapping)
+const uint8_t I2C_SDA_PIN = 2;
+const uint8_t I2C_SCL_PIN = 3;
+
+// I2C recovery timing constants (100 kHz bus → half-period ≈ 5 µs)
+const uint8_t I2C_RECOVERY_CLOCKS    = 9;  // max clocks needed to free a stuck slave
+const uint8_t I2C_RECOVERY_HALF_US   = 5;  // half-period in microseconds
+
+// If a peripheral holds SDA low at power-on (e.g. LCD PCF8574 mid-reset),
+// the AVR Wire library can hang indefinitely. Toggling SCL up to 9 times
+// forces any stuck slave to release SDA so normal communication can resume.
+void recoverI2cBus() {
+  pinMode(I2C_SDA_PIN, INPUT);
+  if (digitalRead(I2C_SDA_PIN) == HIGH) return; // bus is free, nothing to do
+
+  pinMode(I2C_SCL_PIN, OUTPUT);
+  for (uint8_t i = 0; i < I2C_RECOVERY_CLOCKS; i++) {
+    digitalWrite(I2C_SCL_PIN, HIGH);
+    delayMicroseconds(I2C_RECOVERY_HALF_US);
+    digitalWrite(I2C_SCL_PIN, LOW);
+    delayMicroseconds(I2C_RECOVERY_HALF_US);
+  }
+  // Issue a STOP condition (SDA LOW→HIGH while SCL HIGH)
+  pinMode(I2C_SDA_PIN, OUTPUT);
+  digitalWrite(I2C_SDA_PIN, LOW);
+  digitalWrite(I2C_SCL_PIN, HIGH);
+  delayMicroseconds(I2C_RECOVERY_HALF_US);
+  digitalWrite(I2C_SDA_PIN, HIGH);
+  delayMicroseconds(I2C_RECOVERY_HALF_US);
+}
+
 // ================= SETUP / LOOP =================
 void setup() {
+  // When powered from an external 5 V supply (no USB), the ATmega32U4 boots
+  // immediately without the ~8-second USB-bootloader wait that normally lets
+  // all peripherals stabilize. A short delay here ensures the relay module,
+  // LCD, and MAX485 are fully powered before we try to drive or communicate
+  // with them.
+  delay(500);
+
   pinMode(BTN_UP, INPUT_PULLUP);
   pinMode(BTN_DOWN, INPUT_PULLUP);
   pinMode(BTN_ENTER, INPUT_PULLUP);
   pinMode(BTN_BACK, INPUT_PULLUP);
 
+  // Drive relay pins HIGH immediately so active-LOW relay module stays OFF
+  // while the rest of initialisation runs (pins float at power-on otherwise).
   for (uint8_t i = 0; i < 8; i++) {
     pinMode(relayPins[i], OUTPUT);
     setRelay(i, false);
@@ -260,11 +301,16 @@ void setup() {
 
   loadConfig();
 
-  // IMPORTANT: init DMX first (prevents your earlier hang). [2](https://flexpcb.org/arduino-pro-micro-pinout-connection-pins-for-the-atmega32u4-based-microcontroller/)[1](https://github.com/mathertel/DMXSerial/blob/master/src/DMXSerial.h)
-  // Use DMXProbe mode so we can call receive(timeout) explicitly. [3](https://docs.arduino.cc/libraries/arduinodmx/)[1](https://github.com/mathertel/DMXSerial/blob/master/src/DMXSerial.h)
+  // IMPORTANT: init DMX first (prevents your earlier hang).
+  // Use DMXProbe mode so we can call receive(timeout) explicitly.
   DMXSerial.init(DMXProbe);
 
-  // Then LCD/I2C
+  // Recover the I2C bus before initialising the LCD.  If the PCF8574
+  // backpack was still in power-on reset when the MCU started it may hold
+  // SDA low, which would cause Wire.endTransmission() to hang forever on
+  // AVR (no hardware timeout).
+  recoverI2cBus();
+
   Wire.begin();
   lcd.init();
   lcd.backlight();
