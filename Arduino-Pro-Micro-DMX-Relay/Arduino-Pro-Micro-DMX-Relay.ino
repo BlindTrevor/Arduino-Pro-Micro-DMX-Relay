@@ -41,6 +41,12 @@ unsigned long lastPollMs = 0;
 // are firing, can block for hundreds of ms and make the loop appear frozen.
 unsigned long lastDiagMs = 0;
 
+// Timestamp of the last updateHomeRelayLine() LCD write.
+// Throttled to 200 ms: if relay states toggle rapidly (e.g. dmxPresent
+// flickering due to a bad EEPROM timeout value), the ~36 I2C transactions
+// per call would flood the bus and compound the slowness every loop iteration.
+unsigned long lastRelayLineMs = 0;
+
 // ================= EEPROM =================
 struct Config {
   uint16_t magic;
@@ -148,10 +154,21 @@ void loadConfig() {
   if (ON_THRESHOLD < 1) ON_THRESHOLD = 128;
   if (OFF_THRESHOLD > ON_THRESHOLD) OFF_THRESHOLD = (ON_THRESHOLD > 8) ? (ON_THRESHOLD - 8) : 0;
 
-  if (DMX_RECEIVE_WAIT_MS < 5) DMX_RECEIVE_WAIT_MS = 5;
-  if (DMX_RECEIVE_WAIT_MS > 80) DMX_RECEIVE_WAIT_MS = 80;
+  if (DMX_RECEIVE_WAIT_MS < 5)  DMX_RECEIVE_WAIT_MS = 5;
+  // Cap at 30 ms: a higher value blocks loop() for that long whenever a DMX
+  // packet doesn't arrive in the poll window, starving button reads and making
+  // the heartbeat crawl.  Any EEPROM value > 30 (e.g. the old 80 ms max) is
+  // silently clamped here so it self-corrects on the next config save.
+  if (DMX_RECEIVE_WAIT_MS > 30) DMX_RECEIVE_WAIT_MS = 30;
 
-  if (DMX_TIMEOUT_MS < 100) DMX_TIMEOUT_MS = 100;
+  // Enforce that the DMX-loss timeout is large enough that a handful of missed
+  // poll windows doesn't falsely declare "no DMX" and trigger the failsafe.
+  // Minimum = 5× the poll wait (covers 4 consecutive misses) but never < 500 ms.
+  {
+    uint16_t minTimeout = (uint16_t)DMX_RECEIVE_WAIT_MS * 5;
+    if (minTimeout < 500) minTimeout = 500;
+    if (DMX_TIMEOUT_MS < minTimeout) DMX_TIMEOUT_MS = minTimeout;
+  }
   if (DMX_TIMEOUT_MS > 10000) DMX_TIMEOUT_MS = 10000;
 }
 
@@ -210,6 +227,11 @@ bool activeRelayState(uint8_t i) {
 }
 
 void updateHomeRelayLine() {
+  // Throttle to 200 ms using the global lastRelayLineMs so drawHome() can
+  // reset it to force an immediate paint on screen transitions.
+  unsigned long now = millis();
+  if (now - lastRelayLineMs < 200) return;
+  lastRelayLineMs = now;
   lcd.setCursor(4, 1);  // 8 relay chars centered: (LCD_COLS-8)/2 = 4
   for (uint8_t i = 0; i < 8; i++) {
     bool on = activeRelayState(i);
@@ -256,9 +278,10 @@ void drawHome() {
   lcd.setCursor(14, 0);
   lcd.print("  ");
 
-  // Force the diag line to paint immediately on a full redraw, then the
-  // throttle timer resets so the next update fires 500 ms later.
+  // Reset throttle timers so both sub-functions paint immediately on a full
+  // redraw rather than being suppressed by the in-progress timer intervals.
   lastDiagMs = 0;
+  lastRelayLineMs = 0;
   updateHomeDiagLine();
   updateHomeRelayLine();
 }
@@ -385,11 +408,12 @@ void setup() {
   // all peripherals stabilize. A 1-second delay here ensures the relay module,
   // LCD, and MAX485 are fully powered before we try to drive or communicate
   // with them.
+  // BTN_ENTER is pulled up early so the factory-reset check below works.
+  pinMode(BTN_ENTER, INPUT_PULLUP);
   delay(1000);
 
-  pinMode(BTN_UP, INPUT_PULLUP);
+  pinMode(BTN_UP,   INPUT_PULLUP);
   pinMode(BTN_DOWN, INPUT_PULLUP);
-  pinMode(BTN_ENTER, INPUT_PULLUP);
   pinMode(BTN_BACK, INPUT_PULLUP);
 
   loadConfig();
@@ -418,7 +442,33 @@ void setup() {
   // init stage on the LCD.  Wire:ERR means the I2C bus timed out during
   // lcd.init(); Wire:OK means all I2C traffic completed without a timeout.
   drawBootSplash();
-  delay(1000);
+
+  // ── Factory reset ─────────────────────────────────────────────────────────
+  // Hold ENTER during the splash to wipe EEPROM and restore firmware defaults.
+  // This recovers from bad EEPROM values (e.g. W:80 blocking the loop) without
+  // needing to reflash.  The splash stays on screen for 2 s so there is plenty
+  // of time to release the button before normal operation begins.
+  {
+    unsigned long splashStart = millis();
+    bool resetDone = false;
+    while (millis() - splashStart < 2000) {
+      if (!resetDone && digitalRead(BTN_ENTER) == LOW) {
+        // Wipe the magic number so loadConfig() ignores the stored block.
+        uint16_t blank = 0xFFFF;
+        EEPROM.put(EEPROM_ADDR, blank);
+        // Reload — no valid magic means all variables keep their firmware
+        // defaults (dmxStart=1, DMX_RECEIVE_WAIT_MS=30, DMX_TIMEOUT_MS=1000 …)
+        loadConfig();
+        resetDone = true;
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Factory Reset!  ");
+        lcd.setCursor(0, 1);
+        lcd.print("Defaults loaded ");
+      }
+      delay(10);
+    }
+  }
 
   // Seed lastGoodDmxMs to now so the DMX-timeout window is measured from
   // the moment the sketch is fully initialised, not from time zero.
