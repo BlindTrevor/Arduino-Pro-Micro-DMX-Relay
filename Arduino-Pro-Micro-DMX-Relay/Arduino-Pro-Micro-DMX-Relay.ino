@@ -315,7 +315,13 @@ void setup() {
   lcd.init();
   lcd.backlight();
 
-  lastGoodDmxMs = 0;
+  // Seed lastGoodDmxMs to now so the DMX-timeout window is measured from
+  // the moment the sketch is fully initialised, not from time zero.
+  // If we left it at 0, the first call to pollDmx() with no signal would
+  // evaluate (millis() – 0) < DMX_TIMEOUT_MS → true for the first second,
+  // falsely reporting DMX present and calling applyDmxToRelays() with
+  // all-zero channel values instead of honouring the failsafe setting.
+  lastGoodDmxMs = millis();
   dmxPresent = false;
 
   drawHome();

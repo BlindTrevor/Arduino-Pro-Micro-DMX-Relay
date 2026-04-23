@@ -94,6 +94,24 @@ Use **shielded twisted-pair** DMX cable; connect the shield to XLR pin 1.
 
 ---
 
+## Powering the Board
+
+The Pro Micro can be powered in two ways:
+
+| Input pin | Voltage | Notes |
+|---|---|---|
+| **RAW** | 7 – 12 V | Passes through the on-board 5 V regulator — preferred for wall adapters |
+| **VCC** | 5 V regulated | Bypasses the regulator — use only with a clean, regulated 5 V supply |
+
+> **Transformer / wall-adapter tips**
+>
+> * Always use the **RAW** pin with an unregulated wall adapter. Connecting an unregulated supply directly to VCC can damage the microcontroller.
+> * If you must use VCC, ensure the supply is **regulated** and provides at least **500 mA** to cover the MCU, LCD backlight, relay coils, and MAX485 transceiver simultaneously.
+> * Add a **100 µF electrolytic** capacitor between VCC and GND close to the Pro Micro to suppress inrush and switching noise that can cause spurious resets on power-up.
+> * Cheap USB chargers and unfiltered transformer adapters often have noisy or slowly-rising outputs. The firmware includes a short stabilisation delay at startup to give all peripherals time to reach their operating voltage before initialisation begins, but a poor-quality supply may still cause issues.
+
+---
+
 ## Software
 
 ### Dependencies
