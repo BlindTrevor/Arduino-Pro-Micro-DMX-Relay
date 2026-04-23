@@ -35,6 +35,12 @@ unsigned long lastGoodDmxMs = 0;
 // Displayed on the home screen so slow blocking is immediately visible.
 unsigned long lastPollMs = 0;
 
+// Timestamp of the last updateHomeDiagLine() LCD write.
+// The diag line is throttled to 500 ms to avoid flooding the I2C bus —
+// each unthrottled call does ~40 I2C transactions which, if Wire timeouts
+// are firing, can block for hundreds of ms and make the loop appear frozen.
+unsigned long lastDiagMs = 0;
+
 // ================= EEPROM =================
 struct Config {
   uint16_t magic;
@@ -220,6 +226,11 @@ void updateHomeRelayLine() {
 // If P:XX >> W:XX (or shows P:HI) DMXSerial.receive() is blocking much longer than expected.
 void updateHomeDiagLine() {
   if (screen != HOME) return;
+  // Throttle to 500 ms: each call performs ~40 I2C transactions; without
+  // throttling, Wire timeouts (10 ms each) can add hundreds of ms per loop.
+  unsigned long now = millis();
+  if (now - lastDiagMs < 500) return;
+  lastDiagMs = now;
   char buf[5];
   lcd.setCursor(0, 1);
   if (lastPollMs > 99) {
@@ -245,6 +256,9 @@ void drawHome() {
   lcd.setCursor(14, 0);
   lcd.print("  ");
 
+  // Force the diag line to paint immediately on a full redraw, then the
+  // throttle timer resets so the next update fires 500 ms later.
+  lastDiagMs = 0;
   updateHomeDiagLine();
   updateHomeRelayLine();
 }
