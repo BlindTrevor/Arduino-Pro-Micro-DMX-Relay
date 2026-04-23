@@ -60,6 +60,9 @@ bool manualRelayState[8] = {0};
 // relay hysteresis shadow
 bool relayState[8] = {0};
 
+// last relay states drawn on the home screen (for change detection)
+bool lastDrawnRelayState[8] = {0};
+
 // ================= Button debounce =================
 struct DebBtn {
   uint8_t pin;
@@ -184,6 +187,19 @@ void applyManualRelays() {
 }
 
 // ================= LCD screens =================
+bool activeRelayState(uint8_t i) {
+  return manualOverride ? manualRelayState[i] : relayState[i];
+}
+
+void updateHomeRelayLine() {
+  lcd.setCursor(0,1);
+  for (uint8_t i = 0; i < 8; i++) {
+    bool on = activeRelayState(i);
+    lcd.print(on ? (char)('1' + i) : '-');
+    lastDrawnRelayState[i] = on;
+  }
+}
+
 void drawHome() {
   lcd.clear();
   lcd.setCursor(0,0);
@@ -193,11 +209,7 @@ void drawHome() {
   lcd.print(dmxStart);
   lcd.print(manualOverride ? " MAN" : " DMX");
 
-  lcd.setCursor(0,1);
-  for (uint8_t i = 0; i < 8; i++) {
-    bool on = manualOverride ? manualRelayState[i] : relayState[i];
-    lcd.print(on ? (char)('1' + i) : '-');
-  }
+  updateHomeRelayLine();
 }
 
 void drawMenu() {
@@ -372,6 +384,17 @@ void loop() {
       // else HOLD: do nothing
     } else {
       applyDmxToRelays();
+    }
+  }
+
+  // -------- Refresh home relay line if states changed --------
+  if (screen == HOME) {
+    for (uint8_t i = 0; i < 8; i++) {
+      bool on = activeRelayState(i);
+      if (on != lastDrawnRelayState[i]) {
+        updateHomeRelayLine();
+        break;
+      }
     }
   }
 
