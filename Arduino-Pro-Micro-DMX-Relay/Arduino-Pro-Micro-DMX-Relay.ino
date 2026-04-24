@@ -2,8 +2,8 @@
 // Arduino UNO — DMX Relay Controller
 // =============================================================================
 // Receives DMX512 and drives 8 relays.
-// DMX start address and on-threshold are adjustable via 4 buttons + 16×2 LCD.
-// Settings save to EEPROM when returning to the home screen.
+// DMX start address, on-threshold, and no-DMX behaviour are adjustable via
+// 4 buttons + 16×2 LCD.  Settings save to EEPROM when returning to home.
 //
 // Pinout
 //   DMX input     : pin 0 (RX) via MAX485, RE+DE tied LOW to GND
@@ -22,12 +22,14 @@
 //       Disconnect the MAX485 before uploading new sketches via USB.
 //
 // UI
-//   Home screen : shows address, threshold, relay states, DMX status.
+//   Home screen : shows address, relay states, and DMX status.
 //   ENTER       : open settings.
-//   Settings    : cursor selects Address or Threshold row.
+//   Settings    : cursor selects Address, Threshold, or No DMX row.
 //                 UP/DOWN change the value.
 //                 ENTER moves to the next item (or saves+exits on the last one).
 //                 BACK  saves and returns to home immediately.
+//   No DMX      : OFF = all relays off when DMX signal is lost.
+//                 HOLD = relays keep their last state when DMX is lost.
 // =============================================================================
 
 #include <DMXSerial.h>
@@ -51,25 +53,27 @@ const uint8_t BTN_ENTER = A2;
 const uint8_t BTN_BACK  = A3;
 
 // ── Config ───────────────────────────────────────────────────────────────────
-struct Config { uint16_t magic; uint16_t address; uint8_t threshold; };
+struct Config { uint16_t magic; uint16_t address; uint8_t threshold; uint8_t noDmxBehavior; };
 const uint16_t MAGIC   = 0xDA7A;
 const int      EE_ADDR = 0;
 
-uint16_t dmxAddress = 1;    // DMX start channel, 1–505
-uint8_t  threshold  = 128;  // relay ON  when value >= threshold
-                             // relay OFF when value <  (threshold - 8)  [hysteresis]
+uint16_t dmxAddress     = 1;    // DMX start channel, 1–505
+uint8_t  threshold      = 128;  // relay ON  when value >= threshold
+                                 // relay OFF when value <  (threshold - 8)  [hysteresis]
+uint8_t  noDmxBehavior  = 0;    // 0 = OFF (all relays off when no DMX), 1 = HOLD (keep last state)
 
 void loadConfig() {
   Config c;
   EEPROM.get(EE_ADDR, c);
   if (c.magic == MAGIC) {
-    dmxAddress = constrain((uint16_t)c.address,   (uint16_t)1, (uint16_t)505);
-    threshold  = constrain((uint8_t) c.threshold, (uint8_t) 1, (uint8_t) 255);
+    dmxAddress    = constrain((uint16_t)c.address,       (uint16_t)1, (uint16_t)505);
+    threshold     = constrain((uint8_t) c.threshold,     (uint8_t) 1, (uint8_t) 255);
+    noDmxBehavior = (c.noDmxBehavior <= 1) ? c.noDmxBehavior : 0;
   }
 }
 
 void saveConfig() {
-  Config c = {MAGIC, dmxAddress, threshold};
+  Config c = {MAGIC, dmxAddress, threshold, noDmxBehavior};
   EEPROM.put(EE_ADDR, c);
 }
 
@@ -133,14 +137,14 @@ void lcdNum(uint16_t v, uint8_t width) {
 }
 
 // ── Home screen ───────────────────────────────────────────────────────────────
-// Row 0: "Adr:001  Thr:128"   (16 chars)
+// Row 0: "Address:001     "   (16 chars)
 // Row 1: "12345678  DMX   "   (relay pattern + DMX status)
 
 void drawHome() {
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("Adr:");  lcdNum(dmxAddress, 3);
-  lcd.print("  Thr:"); lcdNum(threshold, 3);
+  lcd.print("Address:"); lcdNum(dmxAddress, 3);
+  lcd.print("     ");
 }
 
 void updateHome() {
@@ -151,22 +155,40 @@ void updateHome() {
 }
 
 // ── Settings screen ───────────────────────────────────────────────────────────
-// Row 0: ">Adr:001        "   or  " Adr:001        "
-// Row 1: " Thr:128        "   or  ">Thr:128        "
+// Three settings scroll through a 2-row window:
+//   settingIdx 0 or 1 : row0 = Address, row1 = Threshold
+//   settingIdx 2       : row0 = Threshold, row1 = No DMX
+//
+// Row format: ">Address:001    " / " Address:001    "
+//             ">Thr:128        " / " Thr:128        "
+//             ">No DMX:HOLD    " / " No DMX:OFF     "
 
-uint8_t settingIdx = 0;   // 0 = address, 1 = threshold
+uint8_t settingIdx = 0;   // 0 = address, 1 = threshold, 2 = no-DMX behaviour
 
 void drawSettings() {
   lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(settingIdx == 0 ? '>' : ' ');
-  lcd.print("Adr:"); lcdNum(dmxAddress, 3);
-  lcd.print("        ");
 
-  lcd.setCursor(0, 1);
-  lcd.print(settingIdx == 1 ? '>' : ' ');
-  lcd.print("Thr:"); lcdNum(threshold, 3);
-  lcd.print("        ");
+  // Determine which two items occupy row 0 and row 1.
+  // Window shifts down when settingIdx reaches 2.
+  uint8_t topItem = (settingIdx <= 1) ? 0 : 1;   // 0=Address,1=Threshold,2=NoDMX
+
+  for (uint8_t row = 0; row < 2; row++) {
+    uint8_t item = topItem + row;
+    bool    sel  = (item == settingIdx);
+    lcd.setCursor(0, row);
+    lcd.print(sel ? '>' : ' ');
+
+    if (item == 0) {
+      lcd.print("Address:"); lcdNum(dmxAddress, 3);
+      lcd.print("    ");
+    } else if (item == 1) {
+      lcd.print("Thr:"); lcdNum(threshold, 3);
+      lcd.print("        ");
+    } else {
+      lcd.print("No DMX:");
+      lcd.print(noDmxBehavior ? "HOLD    " : "OFF     ");
+    }
+  }
 }
 
 // ── Screen state ─────────────────────────────────────────────────────────────
@@ -219,9 +241,10 @@ void loop() {
   // DMX → relays (non-blocking — DMXReceiver runs in background ISR).
   if (DMXSerial.noDataSince() < 1000) {
     applyRelays();
-  } else {
+  } else if (noDmxBehavior == 0) {
     allRelaysOff();
   }
+  // noDmxBehavior == 1 (HOLD): do nothing — relays keep their last state.
 
   // ── UI ──────────────────────────────────────────────────────────────────
   if (screen == HOME) {
@@ -242,16 +265,18 @@ void loop() {
 
     if (pressed(BTN_UP)) {
       if (settingIdx == 0) { if (dmxAddress < 505) dmxAddress++; }
-      else                 { if (threshold  < 255) threshold++;  }
+      else if (settingIdx == 1) { if (threshold  < 255) threshold++;  }
+      else                      { noDmxBehavior = 1; }
       drawSettings();
     }
     if (pressed(BTN_DOWN)) {
       if (settingIdx == 0) { if (dmxAddress > 1) dmxAddress--; }
-      else                 { if (threshold  > 1) threshold--;   }
+      else if (settingIdx == 1) { if (threshold  > 1) threshold--;   }
+      else                      { noDmxBehavior = 0; }
       drawSettings();
     }
     if (pressed(BTN_ENTER)) {
-      if (settingIdx < 1) {
+      if (settingIdx < 2) {
         settingIdx++;
         drawSettings();
       } else {
