@@ -25,7 +25,8 @@
 //   Home screen : shows address, relay states, and DMX status.
 //   ENTER       : open settings.
 //   Settings    : cursor selects Address, Threshold, or No DMX row.
-//                 UP/DOWN change the value.
+//                 UP/DOWN change the value.  Hold UP/DOWN to change faster:
+//                   tap = one step; hold >1 s = slow repeat; hold >2 s = fast repeat.
 //                 ENTER moves to the next item (or saves+exits on the last one).
 //                 BACK  saves and returns to home immediately.
 //   No DMX      : OFF = all relays off when DMX signal is lost.
@@ -103,13 +104,15 @@ struct Button {
   uint8_t       lastStable;
   uint8_t       lastRead;
   unsigned long lastFlip;
+  unsigned long pressedAt;   // millis() when button went stably LOW; 0 if not held
+  unsigned long lastRepeat;  // millis() of last auto-repeat fire
 };
 
 Button btns[4] = {
-  {BTN_UP,    HIGH, HIGH, 0},
-  {BTN_DOWN,  HIGH, HIGH, 0},
-  {BTN_ENTER, HIGH, HIGH, 0},
-  {BTN_BACK,  HIGH, HIGH, 0},
+  {BTN_UP,    HIGH, HIGH, 0, 0, 0},
+  {BTN_DOWN,  HIGH, HIGH, 0, 0, 0},
+  {BTN_ENTER, HIGH, HIGH, 0, 0, 0},
+  {BTN_BACK,  HIGH, HIGH, 0, 0, 0},
 };
 
 // Returns true once per press (falling edge, 25 ms debounce).
@@ -122,6 +125,42 @@ bool pressed(uint8_t pin) {
       btns[i].lastStable = r;
       if (r == LOW) return true;
     }
+  }
+  return false;
+}
+
+// Fires on the initial press, then auto-repeats while held with an accelerating
+// rate: slow repeat (every 150 ms) after 1 s, fast repeat (every 40 ms) after 2 s.
+bool held(uint8_t pin) {
+  for (uint8_t i = 0; i < 4; i++) {
+    if (btns[i].pin != pin) continue;
+    uint8_t r = digitalRead(pin);
+    if (r != btns[i].lastRead) { btns[i].lastRead = r; btns[i].lastFlip = millis(); }
+    if (millis() - btns[i].lastFlip <= 25) return false;  // still bouncing
+    unsigned long now = millis();
+    if (r == HIGH) {
+      btns[i].lastStable = HIGH;
+      btns[i].pressedAt  = 0;
+      return false;
+    }
+    // Button is stably LOW.
+    if (btns[i].lastStable == HIGH) {
+      // Initial press — fire once and start hold timer.
+      btns[i].lastStable = LOW;
+      btns[i].pressedAt  = now;
+      btns[i].lastRepeat = now;
+      return true;
+    }
+    // Auto-repeat: interval shrinks the longer the button is held.
+    unsigned long holdDur  = now - btns[i].pressedAt;
+    uint16_t      interval = (holdDur < 1000) ? 0    // no repeat in first second
+                           : (holdDur < 2000) ? 150  // slow: ~6 steps/s
+                           :                    40;   // fast: 25 steps/s
+    if (interval && (now - btns[i].lastRepeat >= interval)) {
+      btns[i].lastRepeat = now;
+      return true;
+    }
+    return false;
   }
   return false;
 }
@@ -263,13 +302,13 @@ void loop() {
 
   } else {  // SETTINGS
 
-    if (pressed(BTN_UP)) {
+    if (held(BTN_UP)) {
       if (settingIdx == 0) { if (dmxAddress < 505) dmxAddress++; }
       else if (settingIdx == 1) { if (threshold  < 255) threshold++;  }
       else                      { noDmxBehavior = 1; }
       drawSettings();
     }
-    if (pressed(BTN_DOWN)) {
+    if (held(BTN_DOWN)) {
       if (settingIdx == 0) { if (dmxAddress > 1) dmxAddress--; }
       else if (settingIdx == 1) { if (threshold  > 1) threshold--;   }
       else                      { noDmxBehavior = 0; }
