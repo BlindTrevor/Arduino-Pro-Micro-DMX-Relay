@@ -262,6 +262,12 @@ void setup() {
   lcd.init();
   lcd.backlight();
 
+  // Splash screen — shown for 1.5 s on power-up.
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print(" Sonic Lighting ");
+  lcd.setCursor(0, 1); lcd.print("Relay Controller");
+  waitMs(1500);
+
   drawHome();
 }
 
