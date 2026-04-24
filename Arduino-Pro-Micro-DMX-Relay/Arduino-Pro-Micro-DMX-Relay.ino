@@ -1,15 +1,25 @@
 // =============================================================================
-// Arduino Pro Micro — DMX Relay Controller
+// Arduino UNO — DMX Relay Controller
 // =============================================================================
 // Receives DMX512 and drives 8 relays.
 // DMX start address and on-threshold are adjustable via 4 buttons + 16×2 LCD.
 // Settings save to EEPROM when returning to the home screen.
 //
-// Hardware
-//   Relay outputs : pins 4, 5, 6, 7, 8, 9, 10, 16  (active-LOW relay module)
-//   Buttons       : UP=A0  DOWN=A1  ENTER=A2  BACK=A3  (INPUT_PULLUP, LOW=pressed)
-//   LCD           : 16×2 I2C at 0x27
-//   DMX input     : MAX485 on Serial1 (pins 0/1), RE+DE tied LOW
+// Pinout
+//   DMX input     : pin 0 (RX) via MAX485, RE+DE tied LOW to GND
+//                   pin 1 (TX) — leave unconnected or tie HIGH via 10k
+//   Relay 1–8     : pins 2, 3, 4, 5, 6, 7, 8, 9  (active-LOW relay module)
+//   Button UP     : pin A0  (other leg to GND)
+//   Button DOWN   : pin A1  (other leg to GND)
+//   Button ENTER  : pin A2  (other leg to GND)
+//   Button BACK   : pin A3  (other leg to GND)
+//   LCD SDA       : pin A4  (I2C, 16×2 LCD with PCF8574 backpack at 0x27)
+//   LCD SCL       : pin A5  (I2C)
+//   LCD 5 V / GND : 5 V and GND rails
+//
+// NOTE: pins 0 and 1 are used exclusively by DMX (hardware Serial).
+//       Do NOT connect anything else to them while DMX is active.
+//       Disconnect the MAX485 before uploading new sketches via USB.
 //
 // UI
 //   Home screen : shows address, threshold, relay states, DMX status.
@@ -26,15 +36,15 @@
 #include <LiquidCrystal_I2C.h>
 #include <util/delay.h>
 
-// Use CPU cycle-counting instead of delay() during setup().
-// On ATmega32U4, USB interrupts starve Timer0 at cold boot, making millis()
-// and delay() run ~8× too slowly.  _delay_ms() is immune to this.
+// _delay_ms() uses CPU cycle-counting and is immune to any Timer0 jitter.
+// Safer than delay() during setup() even on UNO.
 static void waitMs(uint16_t ms) { while (ms--) _delay_ms(1); }
 
 // ── Hardware ─────────────────────────────────────────────────────────────────
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-const uint8_t RELAY_PINS[8] = {4, 5, 6, 7, 8, 9, 10, 16};
+// Relay outputs: pins 2–9.  Pins 0 and 1 are reserved for DMX (Serial).
+const uint8_t RELAY_PINS[8] = {2, 3, 4, 5, 6, 7, 8, 9};
 const uint8_t BTN_UP    = A0;
 const uint8_t BTN_DOWN  = A1;
 const uint8_t BTN_ENTER = A2;
@@ -177,15 +187,12 @@ void setup() {
   pinMode(BTN_ENTER, INPUT_PULLUP);
   pinMode(BTN_BACK,  INPUT_PULLUP);
 
-  // Wait for PSU / LCD backpack to stabilise.
-  // Must use waitMs, not delay() — millis() is unreliable during cold-boot USB
-  // enumeration on ATmega32U4 (USB ISRs starve Timer0).
+  // Wait 500 ms for PSU and LCD backpack to stabilise.
   waitMs(500);
 
   loadConfig();
 
-  // DMXReceiver: interrupt-driven, completely non-blocking.
-  // (DMXProbe uses delay() internally — do not use it.)
+  // DMXReceiver: interrupt-driven on the hardware Serial (pins 0/1).
   DMXSerial.init(DMXReceiver);
 
   // I2C + LCD
