@@ -151,7 +151,7 @@ void updateHome() {
   bool dmxOk = (DMXSerial.noDataSince() < 1000);
   lcd.setCursor(0, 1);
   for (uint8_t i = 0; i < 8; i++) lcd.print(relayOn[i] ? char('1' + i) : '-');
-  lcd.print(dmxOk ? "  DMX   " : "  NO DMX");
+  lcd.print(dmxOk ? "  DMX OK" : "  NO DMX");
 }
 
 // ── Settings screen ───────────────────────────────────────────────────────────
